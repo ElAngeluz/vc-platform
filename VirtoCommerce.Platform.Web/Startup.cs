@@ -21,19 +21,23 @@ using Microsoft.AspNet.SignalR;
 using Microsoft.AspNet.SignalR.Infrastructure;
 using Microsoft.Owin;
 using Microsoft.Owin.Security;
+using Microsoft.Owin.Security.Cookies;
 using Microsoft.Owin.Security.DataProtection;
 using Microsoft.Owin.StaticFiles;
 using Microsoft.Practices.Unity;
 using Owin;
 using VirtoCommerce.Platform.Core.Assets;
+using VirtoCommerce.Platform.Core.Bus;
 using VirtoCommerce.Platform.Core.ChangeLog;
 using VirtoCommerce.Platform.Core.Common;
 using VirtoCommerce.Platform.Core.DynamicProperties;
+using VirtoCommerce.Platform.Core.Events;
 using VirtoCommerce.Platform.Core.ExportImport;
 using VirtoCommerce.Platform.Core.Modularity;
 using VirtoCommerce.Platform.Core.Notifications;
 using VirtoCommerce.Platform.Core.PushNotifications;
 using VirtoCommerce.Platform.Core.Security;
+using VirtoCommerce.Platform.Core.Security.Events;
 using VirtoCommerce.Platform.Core.Serialization;
 using VirtoCommerce.Platform.Core.Settings;
 using VirtoCommerce.Platform.Core.Web.Common;
@@ -46,6 +50,7 @@ using VirtoCommerce.Platform.Data.Infrastructure.Interceptors;
 using VirtoCommerce.Platform.Data.Notifications;
 using VirtoCommerce.Platform.Data.Repositories;
 using VirtoCommerce.Platform.Data.Security;
+using VirtoCommerce.Platform.Data.Security.Handlers;
 using VirtoCommerce.Platform.Data.Security.Identity;
 using VirtoCommerce.Platform.Data.Serialization;
 using VirtoCommerce.Platform.Data.Settings;
@@ -60,6 +65,7 @@ using VirtoCommerce.Platform.Web.Resources;
 using VirtoCommerce.Platform.Web.SignalR;
 using VirtoCommerce.Platform.Web.Swagger;
 using WebGrease.Extensions;
+using AuthenticationOptions = VirtoCommerce.Platform.Core.Security.AuthenticationOptions;
 using GlobalConfiguration = System.Web.Http.GlobalConfiguration;
 
 [assembly: OwinStartup(typeof(Startup))]
@@ -130,6 +136,52 @@ namespace VirtoCommerce.Platform.Web
             };
             var hangfireLauncher = new HangfireLauncher(hangfireOptions);
 
+            var authenticationOptions = new AuthenticationOptions
+            {
+                AllowOnlyAlphanumericUserNames = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:AllowOnlyAlphanumericUserNames", false),
+                RequireUniqueEmail = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:RequireUniqueEmail", false),
+
+                PasswordRequiredLength = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Password.RequiredLength", 5),
+                PasswordRequireNonLetterOrDigit = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Password.RequireNonLetterOrDigit", false),
+                PasswordRequireDigit = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Password.RequireDigit", false),
+                PasswordRequireLowercase = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Password.RequireLowercase", false),
+                PasswordRequireUppercase = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Password.RequireUppercase", false),
+
+                UserLockoutEnabledByDefault = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:UserLockoutEnabledByDefault", true),
+                DefaultAccountLockoutTimeSpan = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:DefaultAccountLockoutTimeSpan", TimeSpan.FromMinutes(5)),
+                MaxFailedAccessAttemptsBeforeLockout = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:MaxFailedAccessAttemptsBeforeLockout", 5),
+
+                DefaultTokenLifespan = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:DefaultTokenLifespan", TimeSpan.FromDays(1)),
+
+                CookiesEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookies.Enabled", true),
+                CookiesValidateInterval = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookies.ValidateInterval", TimeSpan.FromDays(1)),
+
+                BearerTokensEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:BearerTokens.Enabled", true),
+                BearerTokensExpireTimeSpan = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:BearerTokens.AccessTokenExpireTimeSpan", TimeSpan.FromHours(1)),
+
+                HmacEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Hmac.Enabled", true),
+                HmacSignatureValidityPeriod = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Hmac.SignatureValidityPeriod", TimeSpan.FromMinutes(20)),
+
+                ApiKeysEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:ApiKeys.Enabled", true),
+                ApiKeysHttpHeaderName = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:ApiKeys.HttpHeaderName", "api_key"),
+                ApiKeysQueryStringParameterName = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:ApiKeys.QueryStringParameterName", "api_key"),
+
+                AuthenticationMode = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:AuthenticationMode", AuthenticationMode.Active),
+                AuthenticationType = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:AuthenticationType", DefaultAuthenticationTypes.ApplicationCookie),
+                CookieDomain = ConfigurationHelper.GetAppSettingsValue<string>("VirtoCommerce:Authentication:Cookie:Domain", null),
+                CookieHttpOnly = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:HttpOnly", true),
+                CookieName = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:Name", CookieAuthenticationDefaults.CookiePrefix + DefaultAuthenticationTypes.ApplicationCookie),
+                CookiePath = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:Path", "/"),
+                CookieSecure = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:Secure", CookieSecureOption.SameAsRequest),
+                ExpireTimeSpan = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:ExpireTimeSpan", TimeSpan.FromDays(14)),
+                LoginPath = new PathString(ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:LoginPath", string.Empty)),
+                LogoutPath = new PathString(ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:LogoutPath", string.Empty)),
+                ReturnUrlParameter = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:ReturnUrlParameter", CookieAuthenticationDefaults.ReturnUrlParameter),
+                SlidingExpiration = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookie:SlidingExpiration", true)
+            };
+
+            container.RegisterInstance(authenticationOptions);
+
             InitializePlatform(app, container, pathMapper, connectionString, hangfireLauncher, modulesPhysicalPath);
 
             var moduleManager = container.Resolve<IModuleManager>();
@@ -185,7 +237,7 @@ namespace VirtoCommerce.Platform.Web
 
             // Register MVC areas unless running in the Web Platform Installer mode
             if (IsApplication)
-            { 
+            {
                 AreaRegistration.RegisterAllAreas();
             }
 
@@ -194,7 +246,7 @@ namespace VirtoCommerce.Platform.Web
             FilterConfig.RegisterGlobalFilters(GlobalFilters.Filters);
 
             if (IsApplication)
-            { 
+            {
                 RouteConfig.RegisterRoutes(RouteTable.Routes);
             }
 
@@ -202,19 +254,7 @@ namespace VirtoCommerce.Platform.Web
             AuthConfig.RegisterAuth();
 
             // Security OWIN configuration
-            var authenticationOptions = new Core.Security.AuthenticationOptions
-            {
-                CookiesEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookies.Enabled", true),
-                CookiesValidateInterval = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Cookies.ValidateInterval", TimeSpan.FromDays(1)),
-                BearerTokensEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:BearerTokens.Enabled", true),
-                BearerTokensExpireTimeSpan = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:BearerTokens.AccessTokenExpireTimeSpan", TimeSpan.FromHours(1)),
-                HmacEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Hmac.Enabled", true),
-                HmacSignatureValidityPeriod = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:Hmac.SignatureValidityPeriod", TimeSpan.FromMinutes(20)),
-                ApiKeysEnabled = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:ApiKeys.Enabled", true),
-                ApiKeysHttpHeaderName = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:ApiKeys.HttpHeaderName", "api_key"),
-                ApiKeysQueryStringParameterName = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Authentication:ApiKeys.QueryStringParameterName", "api_key"),
-            };
-            OwinConfig.Configure(app, container, authenticationOptions);
+            OwinConfig.Configure(app, container);
 
             hangfireLauncher.ConfigureOwin(app, container);
 
@@ -520,6 +560,14 @@ namespace VirtoCommerce.Platform.Web
                             },
                             new ModuleSetting
                             {
+                                Name = "VirtoCommerce.Platform.UI.ShowMeridian",
+                                ValueType = ModuleSetting.TypeBoolean,
+                                Title = "Meridian labels based on user preferences",
+                                Description = "When set to true (by default), system will display time in format like '12 hour format' when possible",
+                                DefaultValue = true.ToString()
+                            },
+                            new ModuleSetting
+                            {
                                 Name = "VirtoCommerce.Platform.UI.UseTimeAgo",
                                 ValueType = ModuleSetting.TypeBoolean,
                                 Title = "Use time ago format when is possible",
@@ -644,6 +692,8 @@ namespace VirtoCommerce.Platform.Web
                 container.RegisterInstance<IBlobUrlResolver>(azureBlobProvider);
             }
 
+            container.RegisterType<IAssetEntryService, AssetEntryService>(new ContainerControlledLifetimeManager());
+            container.RegisterType<IAssetEntrySearchService, AssetEntryService>(new ContainerControlledLifetimeManager());
 
             #endregion
 
@@ -683,6 +733,8 @@ namespace VirtoCommerce.Platform.Web
 
             container.RegisterType<ISecurityService, SecurityService>();
 
+
+
             #endregion
 
             #region ExportImport
@@ -693,6 +745,16 @@ namespace VirtoCommerce.Platform.Web
 
             container.RegisterType<IExpressionSerializer, XmlExpressionSerializer>();
 
+            #endregion
+
+            #region Events
+            var inProcessBus = new InProcessBus();
+            container.RegisterInstance<IHandlerRegistrar>(inProcessBus);
+            container.RegisterInstance<IEventPublisher>(inProcessBus);
+
+            inProcessBus.RegisterHandler<UserChangedEvent>(async (message, token) => await container.Resolve<LogChangesUserChangedEventHandler>().Handle(message));
+            inProcessBus.RegisterHandler<UserPasswordChangedEvent>(async (message, token) => await container.Resolve<LogChangesUserChangedEventHandler>().Handle(message));
+            inProcessBus.RegisterHandler<UserResetPasswordEvent>(async (message, token) => await container.Resolve<LogChangesUserChangedEventHandler>().Handle(message));
             #endregion
         }
 

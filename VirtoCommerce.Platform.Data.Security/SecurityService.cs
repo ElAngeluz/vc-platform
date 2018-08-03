@@ -1,13 +1,18 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Data.Entity;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CacheManager.Core;
 using Microsoft.AspNet.Identity;
 using VirtoCommerce.Platform.Core.ChangeLog;
 using VirtoCommerce.Platform.Core.Common;
+using VirtoCommerce.Platform.Core.Events;
 using VirtoCommerce.Platform.Core.Modularity;
 using VirtoCommerce.Platform.Core.Security;
+using VirtoCommerce.Platform.Core.Security.Events;
+using VirtoCommerce.Platform.Core.Settings;
 using VirtoCommerce.Platform.Data.Common;
 using VirtoCommerce.Platform.Data.Infrastructure;
 using VirtoCommerce.Platform.Data.Model;
@@ -27,10 +32,13 @@ namespace VirtoCommerce.Platform.Data.Security
         private readonly IModuleCatalog _moduleCatalog;
         private readonly IPermissionScopeService _permissionScopeService;
         private readonly IChangeLogService _changeLogService;
+        private readonly IEventPublisher _eventPublisher;
+        private readonly ISettingsManager _settingsManager;
 
         [CLSCompliant(false)]
         public SecurityService(Func<IPlatformRepository> platformRepository, Func<ApplicationUserManager> userManagerFactory, IApiAccountProvider apiAccountProvider,
-                               IModuleCatalog moduleCatalog, IPermissionScopeService permissionScopeService, ICacheManager<object> cacheManager, IChangeLogService changeLogService)
+                               IModuleCatalog moduleCatalog, IPermissionScopeService permissionScopeService, ICacheManager<object> cacheManager,
+                               IChangeLogService changeLogService, IEventPublisher eventPublisher, ISettingsManager settingsManager)
         {
             _platformRepository = platformRepository;
             _userManagerFactory = userManagerFactory;
@@ -39,19 +47,21 @@ namespace VirtoCommerce.Platform.Data.Security
             _moduleCatalog = moduleCatalog;
             _permissionScopeService = permissionScopeService;
             _changeLogService = changeLogService;
+            _eventPublisher = eventPublisher;
+            _settingsManager = settingsManager;
         }
 
         #region ISecurityService Members
         public virtual async Task<ApplicationUserExtended> FindByNameAsync(string userName, UserDetails detailsLevel)
         {
             var user = await GetApplicationUserByNameAsync(userName);
-            return GetUserExtended(user, detailsLevel);
+            return await GetUserExtendedAsync(user, detailsLevel);
         }
 
         public virtual async Task<ApplicationUserExtended> FindByIdAsync(string userId, UserDetails detailsLevel)
         {
             var user = await GetApplicationUserByIdAsync(userId);
-            return GetUserExtended(user, detailsLevel);
+            return await GetUserExtendedAsync(user, detailsLevel);
         }
 
         public virtual async Task<ApplicationUserExtended> FindByEmailAsync(string email, UserDetails detailsLevel)
@@ -59,7 +69,7 @@ namespace VirtoCommerce.Platform.Data.Security
             using (var userManager = _userManagerFactory())
             {
                 var user = await userManager.FindByEmailAsync(email);
-                return GetUserExtended(user, detailsLevel);
+                return await GetUserExtendedAsync(user, detailsLevel);
             }
         }
 
@@ -68,7 +78,7 @@ namespace VirtoCommerce.Platform.Data.Security
             using (var userManager = _userManagerFactory())
             {
                 var user = await userManager.FindAsync(new UserLoginInfo(loginProvider, providerKey));
-                return GetUserExtended(user, detailsLevel);
+                return await GetUserExtendedAsync(user, detailsLevel);
             }
         }
 
@@ -104,7 +114,7 @@ namespace VirtoCommerce.Platform.Data.Security
                 using (var repository = _platformRepository())
                 {
                     var dbAcount = user.ToDataModel();
-                    if(string.IsNullOrEmpty(user.MemberId))
+                    if (string.IsNullOrEmpty(user.MemberId))
                     {
                         //Use for memberId same account id if its not set (Our current case Contact member 1 - 1 Account workaround). But client may use memberId as for any outer id.
                         dbAcount.MemberId = dbAcount.Id;
@@ -112,9 +122,11 @@ namespace VirtoCommerce.Platform.Data.Security
                     dbAcount.AccountState = AccountState.Approved.ToString();
 
                     repository.Add(dbAcount);
-                    repository.UnitOfWork.Commit();
 
-                    SaveOperationLog(user.Id, SecurityAccountChangesResource.AccountCreatedMessage, EntryState.Added);
+                    var userChangedEntry = new ChangedEntry<ApplicationUserExtended>(user, EntryState.Added);
+                    await _eventPublisher.Publish(new UserChangingEvent(userChangedEntry));
+                    repository.UnitOfWork.Commit();
+                    await _eventPublisher.Publish(new UserChangedEvent(userChangedEntry));
                 }
             }
 
@@ -134,9 +146,10 @@ namespace VirtoCommerce.Platform.Data.Security
 
             //Update ASP.NET indentity user
             var userName = string.Empty;
+            ApplicationUser dbUser = null;
             using (var userManager = _userManagerFactory())
             {
-                var dbUser = await userManager.FindByIdAsync(user.Id);
+                dbUser = await userManager.FindByIdAsync(user.Id);
                 result = ValidateUser(dbUser);
 
                 if (result.Succeeded)
@@ -158,29 +171,24 @@ namespace VirtoCommerce.Platform.Data.Security
                 //Update platform security user
                 using (var repository = _platformRepository())
                 {
-                    var targetDbAcount = repository.GetAccountByName(userName, UserDetails.Full);
+                    var targetDbAcount = await repository.GetAccountByNameAsync(userName, UserDetails.Full);
 
                     if (targetDbAcount == null)
                     {
                         result = new SecurityResult { Errors = new[] { "Account not found." } };
                     }
                     else
-                    {                
+                    {
                         var changedDbAccount = user.ToDataModel();
                         using (var changeTracker = GetChangeTracker(repository))
                         {
-                            //Detect account changes before patch
-                            var changes = DetectAccountChanges(changedDbAccount, targetDbAcount);
-
+                            var userChangedEntry = new ChangedEntry<ApplicationUserExtended>(user, dbUser.ToCoreModel(targetDbAcount, _permissionScopeService), EntryState.Modified);
                             changeTracker.Attach(targetDbAcount);
                             changedDbAccount.Patch(targetDbAcount);
 
+                            await _eventPublisher.Publish(new UserChangingEvent(userChangedEntry));
                             repository.UnitOfWork.Commit();
-
-                            foreach (var key in changes.Keys)
-                            {
-                                SaveOperationLog(user.Id, string.Format(key, string.Join(", ", changes[key].ToArray())), EntryState.Modified);
-                            }
+                            await _eventPublisher.Publish(new UserChangedEvent(userChangedEntry));
                         }
                     }
                 }
@@ -199,19 +207,19 @@ namespace VirtoCommerce.Platform.Data.Security
 
                     if (dbUser != null)
                     {
-
                         await userManager.DeleteAsync(dbUser);
-
                         using (var repository = _platformRepository())
                         {
-                            var account = repository.GetAccountByName(name, UserDetails.Reduced);
+                            var account = await repository.GetAccountByNameAsync(name, UserDetails.Reduced);
                             if (account != null)
                             {
+                                var userChangedEntry = new ChangedEntry<ApplicationUserExtended>(dbUser.ToCoreModel(account, _permissionScopeService), EntryState.Deleted);
                                 repository.Remove(account);
+                                await _eventPublisher.Publish(new UserChangingEvent(userChangedEntry));
                                 repository.UnitOfWork.Commit();
+                                await _eventPublisher.Publish(new UserChangedEvent(userChangedEntry));
                             }
                         }
-
                         //clear cache
                         ResetCache(dbUser.Id, name);
                     }
@@ -246,12 +254,14 @@ namespace VirtoCommerce.Platform.Data.Security
                 if (result.Succeeded)
                 {
                     var identityResult = await userManager.ChangePasswordAsync(dbUser.Id, oldPassword, newPassword);
+                    ResetCache(dbUser.Id, dbUser.UserName);
                     result = identityResult.ToCoreModel();
 
                     if (result.Succeeded)
-                        SaveOperationLog(dbUser.Id, SecurityAccountChangesResource.PasswordChangedMessage, EntryState.Modified);
+                    {
+                        await _eventPublisher.Publish(new UserPasswordChangedEvent(dbUser.Id));
+                    }
                 }
-
                 return result;
             }
         }
@@ -271,7 +281,7 @@ namespace VirtoCommerce.Platform.Data.Security
 
                     if (result.Succeeded)
                     {
-                        SaveOperationLog(dbUser.Id, SecurityAccountChangesResource.PasswordResetMessage, EntryState.Modified);
+                        await _eventPublisher.Publish(new UserResetPasswordEvent(dbUser.Id));
                         //clear cache
                         ResetCache(dbUser.Id, dbUser.UserName);
                     }
@@ -295,7 +305,7 @@ namespace VirtoCommerce.Platform.Data.Security
 
                     if (result.Succeeded)
                     {
-                        SaveOperationLog(dbUser.Id, SecurityAccountChangesResource.PasswordResetMessage, EntryState.Modified);
+                        await _eventPublisher.Publish(new UserResetPasswordEvent(userId));
                         //clear cache
                         ResetCache(dbUser.Id, dbUser.UserName);
                     }
@@ -310,8 +320,11 @@ namespace VirtoCommerce.Platform.Data.Security
             request = request ?? new UserSearchRequest();
             var result = new UserSearchResponse();
 
+            var users = new AccountEntity[] { };
             using (var repository = _platformRepository())
             {
+                repository.DisableChangesTracking();
+
                 var query = repository.Accounts;
 
                 if (request.Keyword != null)
@@ -319,38 +332,40 @@ namespace VirtoCommerce.Platform.Data.Security
                     query = query.Where(u => u.UserName.Contains(request.Keyword));
                 }
 
-                if(!string.IsNullOrEmpty(request.MemberId))
+                if (!string.IsNullOrEmpty(request.MemberId))
                 {
                     //Find all accounts with specified memberId
                     query = query.Where(u => u.MemberId == request.MemberId);
+                }
+                else if (!request.MemberIds.IsNullOrEmpty())
+                {
+                    query = query.Where(u => request.MemberIds.Contains(u.MemberId));
                 }
 
                 if (request.AccountTypes != null && request.AccountTypes.Any())
                 {
                     query = query.Where(x => request.AccountTypes.Contains(x.UserType));
                 }
-                result.TotalCount = query.Count();
+                result.TotalCount = await query.CountAsync();
 
-                var users = query.OrderBy(x => x.UserName)
+                users = await query.OrderBy(x => x.UserName)
                                  .Skip(request.SkipCount)
                                  .Take(request.TakeCount)
-                                 .ToArray();
-
-                var extendedUsers = new List<ApplicationUserExtended>();
-
-                foreach (var user in users)
-                {
-                    var extendedUser = await FindByNameAsync(user.UserName, UserDetails.Reduced);
-                    if (extendedUser != null)
-                    {
-                        extendedUsers.Add(extendedUser);
-                    }
-                }
-
-                result.Users = extendedUsers.ToArray();
-
-                return result;
+                                 .ToArrayAsync();
             }
+            var extendedUsers = new List<ApplicationUserExtended>();
+
+            foreach (var user in users)
+            {
+                var extendedUser = await FindByNameAsync(user.UserName, UserDetails.Reduced);
+                if (extendedUser != null)
+                {
+                    extendedUsers.Add(extendedUser);
+                }
+            }
+            result.Users = extendedUsers.ToArray();
+
+            return result;
         }
 
         public virtual async Task<string> GeneratePasswordResetTokenAsync(string userId)
@@ -358,6 +373,15 @@ namespace VirtoCommerce.Platform.Data.Security
             using (var userManager = _userManagerFactory())
             {
                 return await userManager.GeneratePasswordResetTokenAsync(userId);
+            }
+        }
+
+        public async Task<bool> ValidatePasswordResetTokenAsync(string userId, string token)
+        {
+            using (var userManager = _userManagerFactory())
+            {
+                // "ResetPassword" is hardcoded string in ASP.NET
+                return await userManager.VerifyUserTokenAsync(userId, "ResetPassword", token);
             }
         }
 
@@ -421,7 +445,12 @@ namespace VirtoCommerce.Platform.Data.Security
             using (var userManager = _userManagerFactory())
             {
                 await userManager.ResetAccessFailedCountAsync(userId);
-                var  identityResult = await userManager.SetLockoutEndDateAsync(userId, DateTimeOffset.MinValue);
+                var identityResult = await userManager.SetLockoutEndDateAsync(userId, DateTimeOffset.MinValue);
+                if (identityResult.Succeeded)
+                {
+                    var user = await GetApplicationUserByIdAsync(userId);
+                    ResetCache(userId, user.UserName);
+                }
                 var result = identityResult.ToCoreModel();
                 return result;
             }
@@ -486,15 +515,7 @@ namespace VirtoCommerce.Platform.Data.Security
 
         protected virtual ApplicationUser GetApplicationUserByName(string userName)
         {
-            var result = _cacheManager.Get($"GetUserByName-{userName}", SecurityConstants.CacheRegion, () =>
-            {
-                using (var userManager = _userManagerFactory())
-                {
-                    return Task.Run(async () => await userManager.FindByNameAsync(userName)).Result;
-                }
-            }, cacheNullValue: false);
-
-            return result;
+            return Task.Factory.StartNew(() => GetApplicationUserByNameAsync(userName), CancellationToken.None, TaskCreationOptions.None, TaskScheduler.Default).Unwrap().GetAwaiter().GetResult();
         }
 
         protected virtual async Task<ApplicationUser> GetApplicationUserByNameAsync(string userName)
@@ -510,17 +531,22 @@ namespace VirtoCommerce.Platform.Data.Security
             return result;
         }
 
-        protected virtual ApplicationUserExtended GetUserExtended(ApplicationUser applicationUser, UserDetails detailsLevel)
+        protected ApplicationUserExtended GetUserExtended(ApplicationUser applicationUser, UserDetails detailsLevel)
+        {
+            return Task.Factory.StartNew(() => GetUserExtendedAsync(applicationUser, detailsLevel), CancellationToken.None, TaskCreationOptions.None, TaskScheduler.Default).Unwrap().GetAwaiter().GetResult();
+        }
+
+        protected virtual async Task<ApplicationUserExtended> GetUserExtendedAsync(ApplicationUser applicationUser, UserDetails detailsLevel)
         {
             ApplicationUserExtended result = null;
             if (applicationUser != null)
             {
-                result = _cacheManager.Get($"GetUserByName-{applicationUser.UserName}-{detailsLevel}", SecurityConstants.CacheRegion, () =>
+                result = await _cacheManager.GetAsync($"GetUserByName-{applicationUser.UserName}-{detailsLevel}", SecurityConstants.CacheRegion, async () =>
                 {
                     ApplicationUserExtended retVal;
                     using (var repository = _platformRepository())
                     {
-                        var user = repository.GetAccountByName(applicationUser.UserName, detailsLevel);
+                        var user = await repository.GetAccountByNameAsync(applicationUser.UserName, detailsLevel);
                         retVal = applicationUser.ToCoreModel(user, _permissionScopeService);
                         //Populate available permission scopes
                         if (retVal.Roles != null)
@@ -532,10 +558,24 @@ namespace VirtoCommerce.Platform.Data.Security
                         }
 
                         //Load log entities to account
-                        if (detailsLevel == UserDetails.Full)
+                        if (detailsLevel.HasFlag(UserDetails.Full) || detailsLevel.HasFlag(UserDetails.Export))
+                        {
                             _changeLogService.LoadChangeLogs(retVal);
+                        }
                     }
-
+                    var suppressForcingCredentialsChange = ConfigurationHelper.GetAppSettingsValue("VirtoCommerce:Security:SuppressForcingCredentialsChange", false);
+                    if (!suppressForcingCredentialsChange)
+                    {
+                        //Setting the flags which indicates a necessity of security credentials change
+                        retVal.PasswordExpired = retVal.PasswordHash == Resources.Default.DefaultPasswordHash;
+                        if (retVal.ApiAccounts != null)
+                        {
+                            foreach (var apiAccount in retVal.ApiAccounts)
+                            {
+                                apiAccount.SecretKeyExpired = apiAccount.SecretKey == Resources.Default.DefaultSecretKey;
+                            }
+                        }
+                    }
                     if (detailsLevel != UserDetails.Export)
                     {
                         retVal.PasswordHash = null;
@@ -548,82 +588,20 @@ namespace VirtoCommerce.Platform.Data.Security
             return result;
         }
 
+
+
         protected virtual void ResetCache(string userId, string userName)
         {
             _cacheManager.Remove($"GetUserById-{userId}", SecurityConstants.CacheRegion);
             _cacheManager.Remove($"GetUserByName-{userName}", SecurityConstants.CacheRegion);
-            foreach(var detailLevel in Enum.GetNames(typeof(UserDetails)))
+            //For normalized user name
+            _cacheManager.Remove($"GetUserByName-{userName.Normalize().ToUpperInvariant()}", SecurityConstants.CacheRegion);
+            foreach (var detailLevel in Enum.GetNames(typeof(UserDetails)))
             {
                 _cacheManager.Remove($"GetUserByName-{userName}-{detailLevel}", SecurityConstants.CacheRegion);
+                //For normalized user name
+                _cacheManager.Remove($"GetUserByName-{userName.Normalize().ToUpperInvariant()}-{detailLevel}", SecurityConstants.CacheRegion);
             }
-        }
-
-        protected virtual ListDictionary<string, string> DetectAccountChanges(AccountEntity changedDbAccount, AccountEntity targetDbAcount)
-        {
-            //Log changes
-            var result = new ListDictionary<string, string>();
-            if (changedDbAccount.UserName != targetDbAcount.UserName)
-            {
-                result.Add(SecurityAccountChangesResource.AccountUpdated, $"user name: {targetDbAcount.UserName} -> {changedDbAccount.UserName}");
-            }
-            if (changedDbAccount.UserType != targetDbAcount.UserType)
-            {
-                result.Add(SecurityAccountChangesResource.AccountUpdated, $"user type: {targetDbAcount.UserType} -> {changedDbAccount.UserType}");
-            }
-            if (changedDbAccount.AccountState != targetDbAcount.AccountState)
-            {
-                result.Add(SecurityAccountChangesResource.AccountUpdated, $"account state: {targetDbAcount.AccountState} -> {changedDbAccount.AccountState}");
-            }
-            if (changedDbAccount.IsAdministrator != targetDbAcount.IsAdministrator)
-            {
-                result.Add(SecurityAccountChangesResource.AccountUpdated, $"root: {targetDbAcount.IsAdministrator} -> {changedDbAccount.IsAdministrator}");
-            }
-            if (!changedDbAccount.ApiAccounts.IsNullCollection())
-            {
-                var apiAccountComparer = AnonymousComparer.Create((ApiAccountEntity x) => $"{x.ApiAccountType}-{x.SecretKey}");
-                changedDbAccount.ApiAccounts.CompareTo(targetDbAcount.ApiAccounts, apiAccountComparer, (state, sourceItem, targetItem) =>
-                {
-                    if (state == EntryState.Added)
-                    {
-                        result.Add(SecurityAccountChangesResource.ApiKeysActivated, $"{sourceItem.Name} ({sourceItem.ApiAccountType})");
-                    }
-                    else if (state == EntryState.Deleted)
-                    {
-                        result.Add(SecurityAccountChangesResource.ApiKeysDeactivated, $"{sourceItem.Name} ({sourceItem.ApiAccountType})");
-                    }
-                }
-                );
-            }
-            if (!changedDbAccount.RoleAssignments.IsNullCollection())
-            {
-                var roleAssignmentComparer = AnonymousComparer.Create((RoleAssignmentEntity x) => x.RoleId);
-                changedDbAccount.RoleAssignments.CompareTo(targetDbAcount.RoleAssignments, roleAssignmentComparer, (state, sourceItem, targetItem) =>
-                {
-                    if (state == EntryState.Added)
-                    {
-                        result.Add(SecurityAccountChangesResource.RolesAdded, $"{sourceItem?.RoleName}");
-                    }
-                    else if (state == EntryState.Deleted)
-                    {
-                        result.Add(SecurityAccountChangesResource.RolesRemoved, $"{sourceItem?.RoleName}");
-                    }
-                }
-                );
-            }
-
-            return result;
-        }
-
-        protected virtual void SaveOperationLog(string objectId, string detail, EntryState entryState)
-        {
-            var operation = new OperationLog
-            {
-                ObjectId = objectId,
-                ObjectType = typeof(ApplicationUserExtended).Name,
-                OperationType = entryState,
-                Detail = detail
-            };
-            _changeLogService.SaveChanges(operation);
         }
 
         protected virtual void NormalizeUser(ApplicationUserExtended user)

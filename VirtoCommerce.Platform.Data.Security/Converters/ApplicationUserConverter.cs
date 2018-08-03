@@ -18,7 +18,14 @@ namespace VirtoCommerce.Platform.Data.Security.Converters
             retVal.InjectFrom(applicationUser);
             retVal.InjectFrom(dbEntity);
             retVal.UserState = EnumUtility.SafeParse(dbEntity.AccountState, AccountState.Approved);
-
+            if (applicationUser.Logins != null)
+            {
+                retVal.Logins = applicationUser.Logins.Select(x => new ApplicationUserLogin
+                {
+                    LoginProvider = x.LoginProvider.ToString(),
+                    ProviderKey = x.ProviderKey.ToString()
+                }).ToArray();
+            }
             retVal.Roles = dbEntity.RoleAssignments.Select(x => x.Role.ToCoreModel(scopeService)).ToArray();
             retVal.Permissions = retVal.Roles.SelectMany(x => x.Permissions).SelectMany(x => x.GetPermissionWithScopeCombinationNames()).Distinct().ToArray();
             retVal.ApiAccounts = dbEntity.ApiAccounts.Select(x => x.ToCoreModel()).ToArray();
@@ -53,9 +60,11 @@ namespace VirtoCommerce.Platform.Data.Security.Converters
 
         public static void Patch(this AccountEntity source, AccountEntity target)
         {
-            var patchInjection = new PatchInjection<AccountEntity>(x => x.UserType, x => x.AccountState, x => x.MemberId,
-                                                                   x => x.StoreId, x => x.IsAdministrator, x => x.UserName);
-            target.InjectFrom(patchInjection, source);
+            target.UserType = source.UserType ?? target.UserType;
+            target.AccountState = source.AccountState ?? target.AccountState;
+            target.IsAdministrator = source.IsAdministrator;
+            target.UserName = source.UserName;
+            target.MemberId = source.MemberId;
 
             if (!source.ApiAccounts.IsNullCollection())
             {
@@ -71,10 +80,19 @@ namespace VirtoCommerce.Platform.Data.Security.Converters
 
         public static void Patch(this ApplicationUserExtended user, ApplicationUser dbUser)
         {
-            var patchInjection = new PatchInjection<ApplicationUser>(x => x.Id, x => x.PasswordHash, x => x.SecurityStamp,
-                                                                     x => x.UserName, x => x.Email, x => x.PhoneNumber);
-            dbUser.InjectFrom(patchInjection, user);
-
+            dbUser.Id = user.Id ?? dbUser.Id;
+            dbUser.LockoutEnabled = user.LockoutEnabled;
+            dbUser.LockoutEndDateUtc = user.LockoutEndDateUtc;
+            dbUser.PasswordHash = user.PasswordHash ?? dbUser.PasswordHash;
+            dbUser.PhoneNumber = user.PhoneNumber ?? dbUser.PhoneNumber;
+            dbUser.PhoneNumberConfirmed = user.PhoneNumberConfirmed;
+            dbUser.SecurityStamp = user.SecurityStamp ?? dbUser.SecurityStamp;
+            dbUser.TwoFactorEnabled = user.TwoFactorEnabled;
+            dbUser.UserName = user.UserName ?? dbUser.UserName;
+            dbUser.AccessFailedCount = user.AccessFailedCount;
+            dbUser.EmailConfirmed = user.EmailConfirmed;
+            dbUser.Email = user.Email ?? dbUser.Email;
+            
             // Copy logins
             if (user.Logins != null)
             {

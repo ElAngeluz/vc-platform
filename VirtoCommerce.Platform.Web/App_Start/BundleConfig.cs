@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Web;
@@ -41,7 +41,6 @@ namespace VirtoCommerce.Platform.Web
             //Note: must match the real path (~/Scripts/.) to find source map files references from .min.js (ex. # sourceMappingURL=angular-resource.min.js.map)
             bundles.Add(
                 new ScriptBundle(Startup.VirtualRoot + "/scripts/angular")
-                    .IncludeAndFixRoot("~/Scripts/allPackages.js")
                     .IncludeDirectoryAndFixRoot("~/Scripts/codemirror/", "*.js", true)
                     .IncludeDirectoryAndFixRoot("~/Scripts/app/", "*.js", true)
                     .IncludeDirectoryAndFixRoot("~/Scripts/common/", "*.js", true)
@@ -122,21 +121,11 @@ namespace VirtoCommerce.Platform.Web
                             directory.SearchSubdirectories);
                     }
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    Exception moduleException;
+                    var notFoundPath = file?.VirtualPath ?? directory?.VirtualPath;
+                    ((ManifestModuleInfo)item.Module).Errors.Add($"Path not found ({notFoundPath}).");
 
-                    if (item.Module.ModuleInstance != null)
-                    {
-                        var assemblyName = item.Module.ModuleInstance.GetType().Assembly.FullName;
-                        moduleException = new ModuleInitializeException(item.Module.ModuleName, assemblyName, ex.Message, ex);
-                    }
-                    else
-                    {
-                        moduleException = new ModuleInitializeException(item.Module.ModuleName, ex.Message, ex);
-                    }
-
-                    throw moduleException;
                 }
             }
 
